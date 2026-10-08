@@ -23,7 +23,6 @@ from .topbar import InfoCorner, TopBar
 from .widgets import ChecklistBox, GuideImage
 
 _SEARCH_LIMIT = 18
-_IMG_TIMEOUT_MS = 26000
 
 # Cores de tier da convenção da aba Platinas (GUIA_DE_PLATINA.md, seção 2).
 _TIER_COLORS = {
@@ -174,6 +173,8 @@ class GuidePage(QWidget):
         self._episode_pills: list[tuple[QLabel, dict]] = []
         self._kind_pills: list[tuple[QLabel, str]] = []
         self._trophy_rows: list[tuple[QWidget, str, str, str]] = []
+        # fotos cujo download falhou: cada item é a função que pede de novo
+        self._failed_photos: set = set()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 22, 0)
@@ -217,11 +218,6 @@ class GuidePage(QWidget):
     def closeEvent(self, event):  # noqa: N802 (assinatura do Qt)
         self._image_loader.shutdown()
         super().closeEvent(event)
-
-    def hideEvent(self, event):  # noqa: N802 (assinatura do Qt)
-        if self.window() is not None and self.window().isHidden():
-            self._image_loader.shutdown()
-        super().hideEvent(event)
 
     # ------------------------------------------------------------------ topo
     def _build_header(self) -> None:
@@ -427,38 +423,69 @@ class GuidePage(QWidget):
 
     # ------------------------------------------------------------------ fotos
     def _photo(self, image_id: int | None, caption: str) -> QWidget:
-        holder = GuideImage(560, 316)
-        holder.setObjectName("Muted")
+        """A foto de um passo, com "Tentar de novo" se o download falhar.
+
+        O aviso de falha só aparece quando o carregador desiste de verdade
+        (depois das tentativas automáticas), nunca por cronômetro: antes um
+        timer de 26 s marcava como indisponível foto que ainda estava na fila.
+        """
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        image = GuideImage(560, 316)
+        image.setObjectName("Muted")
+        column.addWidget(image)
         if image_id is None:
-            return holder
+            return box
         url = guide_data.IMG.format(image_id)
-        holder.setText("Carregando foto…")
-        holder.setToolTip(caption)
+        image.setToolTip(caption)
+
+        failed_row = QWidget()
+        row = QHBoxLayout(failed_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        reason_label = _label("", "Muted")
+        retry = QPushButton("Tentar de novo")
+        retry.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        row.addWidget(reason_label, 1)
+        row.addWidget(retry)
+        row.addWidget(_link("Abrir no navegador", url))
+        failed_row.hide()
+        column.addWidget(failed_row)
 
         def show(pixmap) -> None:
+            failed_row.hide()
+            image.show()
+            image.set_source(pixmap)
+            self._failed_photos.discard(request)
+
+        def fail(reason: str) -> None:
+            image.hide()  # sem foto, o espaço dela vira só uma faixa vazia
+            reason_label.setText(f"A foto não carregou ({reason}).")
+            failed_row.show()
+            self._failed_photos.add(request)
+
+        def request() -> None:
+            failed_row.hide()
+            image.show()
+            image.setText("Carregando foto…")
+            cached = self._image_loader.load(url, show, fail)
+            if cached is not None:
+                show(cached)
+
+        retry.clicked.connect(request)
+        request()
+        return box
+
+    def _retry_failed_photos(self) -> None:
+        """O botão do topo da Rota: pede de novo todas as fotos que falharam."""
+        for request in list(self._failed_photos):
+            self._failed_photos.discard(request)
             try:
-                holder.set_source(pixmap)
+                request()
             except RuntimeError:
-                pass  # o card foi fechado antes da foto chegar
-
-        cached = self._image_loader.load(url, show)
-        if cached is not None:
-            show(cached)
-            return holder
-
-        def timeout() -> None:
-            try:
-                if not holder.pixmap() or holder.pixmap().isNull():
-                    holder.setTextFormat(Qt.TextFormat.RichText)
-                    holder.setOpenExternalLinks(True)
-                    holder.setText(
-                        f'Foto indisponível agora. <a href="{_esc(url)}" '
-                        f'style="color:{guide_data.ACCENT}">Abrir no navegador</a>')
-            except RuntimeError:
-                pass
-
-        QTimer.singleShot(_IMG_TIMEOUT_MS, timeout)
-        return holder
+                continue
 
     # ------------------------------------------------------- construção lazy
     def _ensure_built(self, index: int) -> None:
@@ -531,7 +558,10 @@ class GuidePage(QWidget):
         show_nm.toggled.connect(lambda checked: self._set_filter("show_nm", checked))
         filters.addWidget(hide)
         filters.addWidget(show_nm)
+        reload_photos = QPushButton("Recarregar fotos que falharam")
+        reload_photos.clicked.connect(self._retry_failed_photos)
         filters.addStretch(1)
+        filters.addWidget(reload_photos)
         box.addLayout(filters)
         layout.addWidget(intro)
 

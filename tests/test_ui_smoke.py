@@ -9,7 +9,7 @@ class _NoNetwork:
     def __init__(self, _parent=None):
         pass
 
-    def load(self, _url, _on_ready):
+    def load(self, _url, _on_ready, _on_fail=None):
         return None
 
     def shutdown(self):
@@ -78,3 +78,43 @@ def test_module_info_reports_trophies():
     info = module.module_info()
     assert info.status.endswith(f"/{len(guide_data.TROPHIES)} troféus")
     assert "Pesadelo" in module.help_text()
+
+
+class _AlwaysFails(_NoNetwork):
+    def load(self, _url, _on_ready, on_fail=None):
+        on_fail("HTTP 403")
+        return None
+
+
+def test_failed_photo_shows_retry_and_the_global_button_retries(monkeypatch):
+    monkeypatch.setattr(page, "ImageLoader", _AlwaysFails)
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(page, "load_progress", lambda: set())
+    monkeypatch.setattr(page, "save_progress", lambda _v: None)
+    monkeypatch.setattr(page, "load_ui", lambda: {})
+    monkeypatch.setattr(page, "save_ui", lambda _v: None)
+    widget = page.GuidePage()
+    widget._ensure_built(1)  # Rota, com o Episódio 1 aberto
+    assert widget._failed_photos, "foto que falhou precisa entrar na lista"
+    retry_buttons = [b for b in widget.findChildren(page.QPushButton)
+                     if b.text() == "Tentar de novo"]
+    assert retry_buttons
+    assert any("HTTP 403" in label.text() for label in widget.findChildren(page.QLabel))
+
+    got = []
+
+    class _Works(_NoNetwork):
+        def load(self, _url, on_ready, _on_fail=None):
+            from PySide6.QtGui import QPixmap
+            pixmap = QPixmap(8, 8)
+            pixmap.fill()
+            got.append(1)
+            on_ready(pixmap)
+            return None
+
+    widget._image_loader = _Works()
+    failed_before = len(widget._failed_photos)
+    widget._retry_failed_photos()
+    assert len(got) == failed_before
+    assert not widget._failed_photos
+    widget.close()
